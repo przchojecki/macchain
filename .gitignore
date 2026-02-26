@@ -1,0 +1,14 @@
+# SwiftPM / build outputs
+.build/
+
+# Local tool/cache dirs
+.home/
+.claude/
+
+# macOS
+.DS_Store
+
+# Xcode / user files
+*.xcuserstate
+*.xcworkspace/xcuserdata/
+*.xcodeproj/xcuserdata/
