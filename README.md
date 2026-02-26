@@ -1,8 +1,8 @@
 # MacChain
 
-MacChain is a Mac-first proof-of-work blockchain built for Apple Silicon.
+MacChain is a Mac-first proof-of-work blockchain designed specifically for Apple Silicon. Instead of treating the Mac as a generic CPU target, the chain and miner are co-designed around the hardware profile of modern M-series machines: fast on-chip memory, strong AES throughput, matrix-heavy CPU compute, and integrated Metal GPU acceleration.
 
-It combines CPU AES, AMX-style matrix mixing, and Metal GPU trimming into a single mining pipeline that is optimized for unified-memory Macs.
+What makes MacChain unique is its hybrid mining pipeline: CPU-dependent memory work (AES + matrix mixing) feeds directly into GPU graph trimming, followed by compact cycle proofs that are fast to verify. This makes it especially good for AI agents to mine, because agents can script the full loop (`bench` -> `mine` -> `verify`), tune parameters automatically, and validate results quickly in a deterministic CLI workflow without specialized hardware.
 
 ## Why This Exists
 
