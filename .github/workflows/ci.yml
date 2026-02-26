@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  swiftpm:
+    name: SwiftPM Build & Test
+    runs-on: macos-14
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Swift Version
+        run: swift --version
+
+      - name: Resolve Dependencies
+        run: swift package resolve
+
+      - name: Build
+        run: swift build -v
+
+      - name: Test
+        run: swift test -v
+
+  standalone:
+    name: Standalone Build Script
+    runs-on: macos-14
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run Standalone Build
+        run: bash build.sh
+
+      - name: Smoke Test CLI
+        run: ./.build/release/macchain --help
+
+      - name: Upload Build Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: macchain-${{ github.sha }}
+          path: |
+            .build/release/libMacChainLib.dylib
+            .build/release/macchain
+            .build/release/macchain-bench

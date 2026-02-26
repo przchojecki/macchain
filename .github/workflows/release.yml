@@ -1,0 +1,57 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    name: Build And Publish Release
+    runs-on: macos-14
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build
+        run: bash build.sh
+
+      - name: Package Artifacts
+        run: |
+          VERSION="${GITHUB_REF_NAME:-manual}"
+          STAGE_DIR="dist/macchain-${VERSION}-macos-arm64"
+
+          rm -rf dist
+          mkdir -p "${STAGE_DIR}"
+
+          cp .build/release/macchain "${STAGE_DIR}/"
+          cp .build/release/macchain-bench "${STAGE_DIR}/"
+          cp .build/release/libMacChainLib.dylib "${STAGE_DIR}/"
+          cp README.md "${STAGE_DIR}/"
+          cp macchain.md "${STAGE_DIR}/"
+
+          tar -czf "macchain-${VERSION}-macos-arm64.tar.gz" -C dist "macchain-${VERSION}-macos-arm64"
+          shasum -a 256 "macchain-${VERSION}-macos-arm64.tar.gz" > "macchain-${VERSION}-macos-arm64.sha256"
+
+      - name: Upload Release Bundle (workflow_dispatch)
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: macchain-release-bundle-${{ github.sha }}
+          path: |
+            macchain-${{ github.ref_name }}-macos-arm64.tar.gz
+            macchain-${{ github.ref_name }}-macos-arm64.sha256
+
+      - name: Publish GitHub Release (tag push)
+        if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            macchain-${{ github.ref_name }}-macos-arm64.tar.gz
+            macchain-${{ github.ref_name }}-macos-arm64.sha256

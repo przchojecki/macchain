@@ -95,6 +95,32 @@ Produces:
 .build/release/macchain --help
 ```
 
+## CI
+
+GitHub Actions runs on every push to `main` and every pull request:
+
+- SwiftPM build + test (`swift build`, `swift test`)
+- standalone build script (`bash build.sh`)
+- CLI smoke check (`macchain --help`)
+
+Workflow file: `.github/workflows/ci.yml`
+
+## Releases
+
+Release workflow triggers on tags matching `v*` and publishes:
+
+- `macchain-<tag>-macos-arm64.tar.gz`
+- `macchain-<tag>-macos-arm64.sha256`
+
+Create a release by tagging and pushing:
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+Workflow file: `.github/workflows/release.yml`
+
 ## Project Layout
 
 ```text
