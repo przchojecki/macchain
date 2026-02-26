@@ -218,8 +218,10 @@ final class ChainStateTests: XCTestCase {
         let b1 = makeDevChildBlock(parent: genesis, height: 1, timestamp: 2, marker: "b1")
         let b2 = makeDevChildBlock(parent: b1, height: 2, timestamp: 3, marker: "b2")
 
-        XCTAssertEqual(await state.submitBlock(a1).isAccepted, true)
-        XCTAssertEqual(await state.submitBlock(b1).isAccepted, true)
+        let a1Accepted = await state.submitBlock(a1).isAccepted
+        XCTAssertTrue(a1Accepted)
+        let b1Accepted = await state.submitBlock(b1).isAccepted
+        XCTAssertTrue(b1Accepted)
 
         let promote = await state.submitBlock(b2)
         switch promote {
@@ -253,8 +255,10 @@ final class ChainStateTests: XCTestCase {
         let c1 = makeDevChildBlock(parent: genesis, height: 1, timestamp: 2, marker: "c1")
         let c2 = makeDevChildBlock(parent: c1, height: 2, timestamp: 3, marker: "c2")
 
-        XCTAssertTrue(await state1.submitBlock(c1).isAccepted)
-        XCTAssertTrue(await state1.submitBlock(c2).isAccepted)
+        let c1Accepted = await state1.submitBlock(c1).isAccepted
+        XCTAssertTrue(c1Accepted)
+        let c2Accepted = await state1.submitBlock(c2).isAccepted
+        XCTAssertTrue(c2Accepted)
         let tip1 = await state1.tip()
 
         let state2 = try ChainState(config: config)
@@ -285,12 +289,18 @@ final class ChainStateTests: XCTestCase {
         let b2 = makeDevChildBlock(parent: b1, height: 2, timestamp: 3, marker: "b2")
         let b3 = makeDevChildBlock(parent: b2, height: 3, timestamp: 4, marker: "b3")
 
-        XCTAssertTrue(await state1.submitBlock(a1).isAccepted)
-        XCTAssertTrue(await state1.submitBlock(a2).isAccepted)
-        XCTAssertTrue(await state1.submitBlock(b1).isAccepted)
-        XCTAssertTrue(await state1.submitBlock(b2).isAccepted)
-        XCTAssertTrue(await state1.submitBlock(b3).isAccepted)
-        XCTAssertEqual(await state1.tip().hash, b3.blockHash)
+        let a1Accepted = await state1.submitBlock(a1).isAccepted
+        XCTAssertTrue(a1Accepted)
+        let a2Accepted = await state1.submitBlock(a2).isAccepted
+        XCTAssertTrue(a2Accepted)
+        let b1Accepted = await state1.submitBlock(b1).isAccepted
+        XCTAssertTrue(b1Accepted)
+        let b2Accepted = await state1.submitBlock(b2).isAccepted
+        XCTAssertTrue(b2Accepted)
+        let b3Accepted = await state1.submitBlock(b3).isAccepted
+        XCTAssertTrue(b3Accepted)
+        let tipHash = await state1.tip().hash
+        XCTAssertEqual(tipHash, b3.blockHash)
 
         let state2 = try ChainState(config: config)
         let tip2 = await state2.tip()
@@ -371,10 +381,12 @@ final class ChainStateTests: XCTestCase {
         }
 
         let spentOutPoint = OutPoint(txID: genesisTx.txID, outputIndex: 0)
-        XCTAssertNil(await state.utxo(for: spentOutPoint))
+        let spentOutput = await state.utxo(for: spentOutPoint)
+        XCTAssertNil(spentOutput)
 
         let newOutPoint = OutPoint(txID: spend.txID, outputIndex: 0)
-        XCTAssertEqual(await state.utxo(for: newOutPoint)?.value, 4_999_999_000)
+        let newOutputValue = await state.utxo(for: newOutPoint)?.value
+        XCTAssertEqual(newOutputValue, 4_999_999_000)
     }
 
     func testDefaultInsecureGenesisSpendableWithDerivedKey() async throws {

@@ -11,7 +11,8 @@ final class MempoolTests: XCTestCase {
         let tx = makeSignedSpendFromGenesis(genesis: genesis, privateKey: key, valueOut: 4_999_999_000)
         let result = await mempool.add(tx)
         XCTAssertEqual(result, .accepted)
-        XCTAssertEqual(await mempool.count(), 1)
+        let count = await mempool.count()
+        XCTAssertEqual(count, 1)
     }
 
     func testRejectMissingInput() async throws {
@@ -47,7 +48,8 @@ final class MempoolTests: XCTestCase {
         let first = makeSignedSpendFromGenesis(genesis: genesis, privateKey: key, valueOut: 4_999_999_000)
         let second = makeSignedSpendFromGenesis(genesis: genesis, privateKey: key, valueOut: 4_999_998_000)
 
-        XCTAssertEqual(await mempool.add(first), .accepted)
+        let firstResult = await mempool.add(first)
+        XCTAssertEqual(firstResult, .accepted)
         let secondResult = await mempool.add(second)
         switch secondResult {
         case .rejected(let reason):
