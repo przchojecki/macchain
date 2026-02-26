@@ -54,6 +54,7 @@ swiftc \
     -framework Metal \
     -framework Accelerate \
     -framework CryptoKit \
+    -framework Network \
     -swift-version 5 \
     $LIB_SOURCES
 
@@ -75,6 +76,7 @@ swiftc \
     -framework Metal \
     -framework Accelerate \
     -framework CryptoKit \
+    -framework Network \
     -swift-version 5 \
     $CLI_FILES
 
@@ -96,6 +98,7 @@ swiftc \
     -framework Metal \
     -framework Accelerate \
     -framework CryptoKit \
+    -framework Network \
     -swift-version 5 \
     $BENCH_FILES
 

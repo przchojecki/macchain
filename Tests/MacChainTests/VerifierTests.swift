@@ -2,6 +2,14 @@ import XCTest
 @testable import MacChainLib
 
 final class VerifierTests: XCTestCase {
+    static let smallParams = MacChainParams(
+        scratchpadSize: 1_048_576,
+        numEdges: 1 << 12,
+        numNodes: 1 << 11,
+        nodeMask: 0x7FF,
+        matrixDim: 8,
+        trimRounds: 20
+    )
 
     func testProofSerialization() {
         let header = Data(repeating: 0xAA, count: 80)
@@ -99,5 +107,69 @@ final class VerifierTests: XCTestCase {
 
         let data = header.serialized()
         XCTAssertEqual(data.count, 80)
+    }
+
+    func testVerifyCycleOnlyRejectsOutOfRangeEdgeIndex() {
+        let verifier = Verifier(params: Self.smallParams, enforceTrimmedCycle: false)
+        let proof = MacChainProof(
+            blockHeader: BlockHeader().serialized(),
+            nonce: 1,
+            cycleEdges: [0, 1, 2, 3, 4, 5, 6, UInt32(Self.smallParams.numEdges)]
+        )
+
+        let result = verifier.verifyCycleOnly(proof)
+        guard case .invalid(let reason) = result else {
+            XCTFail("Expected out-of-range proof to be invalid")
+            return
+        }
+        XCTAssertTrue(reason.contains("out of range"))
+    }
+
+    func testVerifyRejectsUnexpectedHeaderBits() {
+        let expectedBits: UInt32 = 0x1f00ffff
+        let proofBits: UInt32 = 0x1e00ffff
+        let verifier = Verifier(
+            params: Self.smallParams,
+            expectedBits: expectedBits,
+            enforceTrimmedCycle: false
+        )
+
+        let header = BlockHeader(bits: proofBits).serialized()
+        let proof = MacChainProof(
+            blockHeader: header,
+            nonce: 7,
+            cycleEdges: [0, 1, 2, 3, 4, 5, 6, 7]
+        )
+
+        let result = verifier.verify(proof)
+        guard case .invalid(let reason) = result else {
+            XCTFail("Expected mismatched bits to be invalid")
+            return
+        }
+        XCTAssertTrue(reason.contains("do not match expected"))
+    }
+
+    func testFormsValidCycleRejectsDisjoint4Cycles() {
+        let disjoint = [
+            Edge(u: 0, v: 0), Edge(u: 1, v: 0), Edge(u: 1, v: 1), Edge(u: 0, v: 1),
+            Edge(u: 2, v: 2), Edge(u: 3, v: 2), Edge(u: 3, v: 3), Edge(u: 2, v: 3),
+        ]
+
+        XCTAssertFalse(Verifier.formsValidCycle(disjoint))
+    }
+
+    func testFormsValidCycleAcceptsSingle8Cycle() {
+        let cycle = [
+            Edge(u: 0, v: 0),
+            Edge(u: 1, v: 0),
+            Edge(u: 1, v: 1),
+            Edge(u: 2, v: 1),
+            Edge(u: 2, v: 2),
+            Edge(u: 3, v: 2),
+            Edge(u: 3, v: 3),
+            Edge(u: 0, v: 3),
+        ]
+
+        XCTAssertTrue(Verifier.formsValidCycle(cycle))
     }
 }

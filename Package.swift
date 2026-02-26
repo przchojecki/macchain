@@ -21,6 +21,7 @@ let package = Package(
             linkerSettings: [
                 .linkedFramework("Metal"),
                 .linkedFramework("Accelerate"),
+                .linkedFramework("Network"),
             ]
         ),
         .executableTarget(

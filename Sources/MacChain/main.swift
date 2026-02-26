@@ -3,6 +3,7 @@ import MacChainLib
 
 private let appName = "macchain"
 private let cliVersion = "0.1.3"
+private var activeNodeService: P2PNodeService?
 
 private struct ParsedCommandArgs {
     var values: [String: String] = [:]
@@ -153,6 +154,7 @@ private func printMainUsage() {
       mine      Mine for a valid MacChain proof
       bench     Benchmark the mining pipeline
       verify    Verify a serialized proof
+      node      Run a local MacChain node service
       help      Show global or command help
 
     GLOBAL OPTIONS:
@@ -203,17 +205,38 @@ private func printVerifyUsage() {
     Verify a serialized MacChain proof.
 
     USAGE:
-      \(appName) verify --proof <hex> [--full]
-      \(appName) verify <hex> [--full]
+      \(appName) verify --proof <hex> [--cycle-only]
+      \(appName) verify <hex> [--cycle-only]
 
     OPTIONS:
       --proof <hex>           Hex-encoded serialized proof
-      --full                  Run full verification (includes difficulty check)
+      --full                  Run full verification (default)
+      --cycle-only            Skip trimming and difficulty checks (debug only)
       -h, --help              Show this help
 
     NOTES:
-      Default mode verifies cycle validity only.
-      Use --full to also enforce current difficulty target.
+      Default mode performs full verification (cycle + trimming + difficulty).
+      Use --cycle-only for a fast structural check only.
+    """)
+}
+
+private func printNodeUsage() {
+    print("""
+    Run a local MacChain node service (P2P + chainstate skeleton).
+
+    USAGE:
+      \(appName) node [options]
+
+    OPTIONS:
+      --listen <port>         TCP port to listen on (default: 8338)
+      --connect <peers>       Comma-separated host:port peers to connect to
+      --network-id <id>       Network identifier (default: macchain-main)
+      --data-dir <path>       Chain data directory (default: ./.macchain-data)
+      -h, --help              Show this help
+
+    EXAMPLE:
+      \(appName) node --listen 8338
+      \(appName) node --listen 8339 --connect 127.0.0.1:8338
     """)
 }
 
@@ -456,7 +479,7 @@ private func runBench(args: [String]) {
 
 private func runVerify(args: [String]) {
     let valueOptions: Set<String> = ["--proof"]
-    let flagOptions: Set<String> = ["--full", "--help", "-h"]
+    let flagOptions: Set<String> = ["--full", "--cycle-only", "--help", "-h"]
 
     let parsed: ParsedCommandArgs
     switch parseCommandArgs(args, valueOptions: valueOptions, flagOptions: flagOptions) {
@@ -479,6 +502,11 @@ private func runVerify(args: [String]) {
         exit(2)
     }
 
+    if parsed.flags.contains("--full") && parsed.flags.contains("--cycle-only") {
+        printError("Use either --full or --cycle-only, not both")
+        exit(2)
+    }
+
     let proofHex = parsed.values["--proof"] ?? parsed.positionals.first ?? ""
     guard !proofHex.isEmpty else {
         printError("Missing proof. Provide --proof <hex> or positional <hex>.")
@@ -496,7 +524,7 @@ private func runVerify(args: [String]) {
         exit(2)
     }
 
-    let fullCheck = parsed.flags.contains("--full")
+    let fullCheck = !parsed.flags.contains("--cycle-only")
     let verifier = Verifier()
     let result = fullCheck ? verifier.verify(proof) : verifier.verifyCycleOnly(proof)
 
@@ -514,6 +542,102 @@ private func runVerify(args: [String]) {
         printKeyValue("Reason", reason)
         exit(1)
     }
+}
+
+private func runNode(args: [String]) {
+    let valueOptions: Set<String> = ["--listen", "--connect", "--network-id", "--data-dir"]
+    let flagOptions: Set<String> = ["--help", "-h"]
+
+    let parsed: ParsedCommandArgs
+    switch parseCommandArgs(args, valueOptions: valueOptions, flagOptions: flagOptions) {
+    case .success(let p):
+        parsed = p
+    case .failure(let err):
+        printError(err.text)
+        printNodeUsage()
+        exit(2)
+    }
+
+    if parsed.flags.contains("--help") || parsed.flags.contains("-h") {
+        printNodeUsage()
+        return
+    }
+
+    if !parsed.positionals.isEmpty {
+        printError("Unexpected positional arguments: \(parsed.positionals.joined(separator: " "))")
+        printNodeUsage()
+        exit(2)
+    }
+
+    guard let port = parseIntOption(parsed, name: "--listen", default: 8338),
+          (1...65535).contains(port) else {
+        printError("--listen must be a valid TCP port (1-65535)")
+        exit(2)
+    }
+
+    let networkID = parsed.values["--network-id"] ?? "macchain-main"
+    let dataDir = parsed.values["--data-dir"] ?? ".macchain-data"
+    let peersRaw = parsed.values["--connect"] ?? ""
+    let peers = peersRaw
+        .split(separator: ",")
+        .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        .filter { !$0.isEmpty }
+
+    let genesis = ChainState.makeInsecureGenesis(
+        timestamp: 1_735_689_600,
+        bits: 0x1f00ffff,
+        networkTag: networkID
+    )
+    let chainConfig = ChainConfig(
+        genesisBlock: genesis,
+        params: .default,
+        minimumDifficulty: .initial,
+        policy: ChainPolicy(allowInsecureGenesis: true),
+        storageDirectory: URL(fileURLWithPath: dataDir, isDirectory: true)
+    )
+
+    let chainState: ChainState
+    do {
+        chainState = try ChainState(config: chainConfig)
+    } catch {
+        printError("Failed to initialize chainstate: \(error.localizedDescription)")
+        exit(1)
+    }
+
+    let mempool = Mempool(chainState: chainState)
+    let nodeConfig = NodeServiceConfig(
+        networkID: networkID,
+        listenPort: UInt16(port),
+        bootstrapPeers: peers
+    )
+    let nodeService = P2PNodeService(config: nodeConfig, chainState: chainState, mempool: mempool)
+
+    do {
+        try nodeService.start()
+    } catch {
+        printError("Failed to start node service: \(error.localizedDescription)")
+        exit(1)
+    }
+
+    activeNodeService = nodeService
+
+    print("MacChain Node")
+    print("------------")
+    printKeyValue("Version", cliVersion)
+    printKeyValue("Network ID", networkID)
+    printKeyValue("Listen port", String(port))
+    printKeyValue("Data dir", dataDir)
+    printKeyValue("Bootstrap peers", peers.isEmpty ? "none" : peers.joined(separator: ", "))
+    print("")
+    print("Node running. Press Ctrl+C to stop.")
+
+    Task {
+        let tip = await chainState.tip()
+        printKeyValue("Chain height", formatCount(Int(tip.height)))
+        printKeyValue("Best hash", tip.hash.hexString)
+    }
+
+    RunLoop.main.run()
 }
 
 private func cpuTrim(edges: [Edge], params: MacChainParams) -> [Int] {
@@ -546,23 +670,6 @@ private func cpuTrim(edges: [Edge], params: MacChainParams) -> [Int] {
     return (0..<edges.count).filter { alive[$0] }
 }
 
-private extension Data {
-    init?(hexString: String) {
-        let hex = hexString.hasPrefix("0x") ? String(hexString.dropFirst(2)) : hexString
-        guard hex.count % 2 == 0 else { return nil }
-
-        var data = Data(capacity: hex.count / 2)
-        var index = hex.startIndex
-        while index < hex.endIndex {
-            let next = hex.index(index, offsetBy: 2)
-            guard let byte = UInt8(hex[index..<next], radix: 16) else { return nil }
-            data.append(byte)
-            index = next
-        }
-        self = data
-    }
-}
-
 // MARK: - Entry
 
 let args = Array(CommandLine.arguments.dropFirst())
@@ -582,12 +689,15 @@ case "bench":
     runBench(args: commandArgs)
 case "verify":
     runVerify(args: commandArgs)
+case "node":
+    runNode(args: commandArgs)
 case "help", "--help", "-h":
     if let topic = commandArgs.first {
         switch topic {
         case "mine": printMineUsage()
         case "bench": printBenchUsage()
         case "verify": printVerifyUsage()
+        case "node": printNodeUsage()
         default:
             printError("Unknown help topic '\(topic)'")
             printMainUsage()

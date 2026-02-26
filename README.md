@@ -17,8 +17,14 @@ The goal is to keep commodity Apple Silicon competitive while preserving short p
 ## Current Components
 
 - `MacChainLib` (core library)
-- `macchain` (CLI: `mine`, `bench`, `verify`)
+- `macchain` (CLI: `mine`, `bench`, `verify`, `node`)
 - `macchain-bench` (benchmark executable)
+- chain/transaction primitives (`Transaction`, `Block`)
+- chainstate + mempool actors (`ChainState`, `Mempool`)
+- file-backed block store + tip metadata (`--data-dir`, restart rebuild)
+- Ed25519 transaction scripts (`TxScript`) + input signature checks
+- P2P node service skeleton (`P2PNodeService`)
+- UTXO state-transition checks (coinbase, input existence, spend/value rules)
 - Metal shaders for trimming (`TrimU`, `TrimV`, `DegreeCount`)
 
 ## Mining Pipeline
@@ -53,10 +59,19 @@ Output: `MacChainProof`.
 `Verifier` checks:
 
 - proof serialization integrity
-- graph/cycle validity
-- optional difficulty target satisfaction
+- edge-index bounds and duplicate protection
+- single 8-cycle graph validity
+- trim-survival constraints for full verification
+- difficulty target satisfaction from header bits
 
 This keeps verification much cheaper than full mining.
+
+## Chainstate And Tx Authorization
+
+- chainstate persists accepted blocks and best-tip metadata to disk
+- on restart, chainstate replays persisted blocks from genesis and recomputes best tip by total work
+- tx authorization uses a minimal script template: pay-to-Ed25519-public-key locking script + Ed25519 signature unlocking script
+- signature checks are enforced during block validation and mempool admission
 
 ## Build
 
@@ -66,6 +81,8 @@ This keeps verification much cheaper than full mining.
 swift build
 swift test
 ```
+
+If `swift test` fails with a local SwiftPM/manifest-loader mismatch, use `bash build.sh` as the current fallback while fixing the local toolchain install.
 
 ### 2) Standalone Script (fallback)
 
@@ -103,6 +120,26 @@ Verify a proof returned by the miner:
 .build/release/macchain verify --proof <hex-from-mine-output>
 ```
 
+## Quickstart Node (Local P2P)
+
+Run two local nodes and connect them:
+
+```bash
+# Terminal 1
+.build/release/macchain node --listen 8338 --data-dir ./.macchain-a
+
+# Terminal 2
+.build/release/macchain node --listen 8339 --data-dir ./.macchain-b --connect 127.0.0.1:8338
+```
+
+Notes:
+
+- this is an initial public-network skeleton (handshake, tip exchange, tx/block relay)
+- nodes request missing blocks with `getBlock` when peers advertise higher tips or send orphans
+- chainstate enforces block structure, UTXO transitions, and script/signature checks
+- blocks/tip metadata are persisted under `--data-dir` and rebuilt on restart
+- full fork-choice/difficulty-retarget networking logic is still evolving
+
 ## CLI Usage
 
 ```bash
@@ -114,6 +151,9 @@ Verify a proof returned by the miner:
 
 # Verify proof
 .build/release/macchain verify --proof <hex>
+
+# Run node
+.build/release/macchain node --listen 8338 --connect 127.0.0.1:8339
 
 # Help
 .build/release/macchain --help
@@ -167,6 +207,6 @@ Current focus:
 
 - correctness of edge generation, trimming, and cycle verification
 - benchmarkability on Apple Silicon
-- clean module boundaries for future network/consensus integration
+- bootstrap of chainstate and P2P node scaffolding for a runnable public network
 
 For deeper algorithm notes and rationale, see `macchain.md`.
