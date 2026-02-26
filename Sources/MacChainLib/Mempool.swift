@@ -66,9 +66,18 @@ public actor Mempool {
         if let chainState {
             if let reason = await chainState.validateTransactionAgainstTip(
                 transaction,
-                allowUnconfirmedParents: allowUnconfirmedParents
+                allowUnconfirmedParents: false
             ) {
-                return .rejected(reason)
+                if allowUnconfirmedParents && reason == "missing input in chain UTXO set" {
+                    if let fallbackReason = await validateWithMempoolParents(
+                        transaction,
+                        chainState: chainState
+                    ) {
+                        return .rejected(fallbackReason)
+                    }
+                } else {
+                    return .rejected(reason)
+                }
             }
         }
 
@@ -121,5 +130,60 @@ public actor Mempool {
         }
 
         return selected
+    }
+
+    private func validateWithMempoolParents(
+        _ transaction: Transaction,
+        chainState: ChainState
+    ) async -> String? {
+        guard let outputTotal = sumOutputs(transaction.outputs) else {
+            return "transaction output value overflow"
+        }
+
+        var inputTotal: UInt64 = 0
+        for (inputIndex, input) in transaction.inputs.enumerated() {
+            let prevOutput: TransactionOutput
+            if let chainOutput = await chainState.utxo(for: input.outPoint) {
+                prevOutput = chainOutput
+            } else if let mempoolOutput = previousOutputFromMempool(for: input.outPoint) {
+                prevOutput = mempoolOutput
+            } else {
+                return "missing input in chain UTXO set"
+            }
+
+            if !transaction.verifyInputSignature(inputIndex: inputIndex, previousOutput: prevOutput) {
+                return "input signature verification failed"
+            }
+
+            let (nextInputTotal, overflow) = inputTotal.addingReportingOverflow(prevOutput.value)
+            guard !overflow else { return "input value overflow" }
+            inputTotal = nextInputTotal
+        }
+
+        guard inputTotal >= outputTotal else {
+            return "transaction spends more than available inputs"
+        }
+
+        return nil
+    }
+
+    private func previousOutputFromMempool(for outPoint: OutPoint) -> TransactionOutput? {
+        guard let parent = transactionsByID[outPoint.txID],
+              let index = Int(exactly: outPoint.outputIndex),
+              index >= 0,
+              index < parent.outputs.count else {
+            return nil
+        }
+        return parent.outputs[index]
+    }
+
+    private func sumOutputs(_ outputs: [TransactionOutput]) -> UInt64? {
+        var total: UInt64 = 0
+        for output in outputs {
+            let (next, overflow) = total.addingReportingOverflow(output.value)
+            guard !overflow else { return nil }
+            total = next
+        }
+        return total
     }
 }

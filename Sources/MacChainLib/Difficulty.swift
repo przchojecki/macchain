@@ -11,6 +11,11 @@ public struct Difficulty {
         self.target = target
     }
 
+    /// Compact representation (nBits-style) derived from the current target.
+    public var compact: UInt32 {
+        Self.compactFromTarget(target)
+    }
+
     /// Create from compact "bits" representation (similar to Bitcoin's nBits).
     /// Format: first byte = number of bytes, remaining 3 bytes = coefficient.
     /// target = coefficient * 2^(8*(exponent-3))
@@ -57,21 +62,15 @@ public struct Difficulty {
         actualTimeSeconds: Double,
         expectedTimeSeconds: Double = kTargetBlockTimeSeconds * Double(kBlocksPerAdjustment)
     ) -> UInt32 {
-        // Ratio of actual to expected time
-        var ratio = actualTimeSeconds / expectedTimeSeconds
+        guard expectedTimeSeconds > 0 else { return currentBits }
 
-        // Clamp to 4x adjustment per period (like Bitcoin)
-        ratio = max(0.25, min(4.0, ratio))
+        let ratio = actualTimeSeconds / expectedTimeSeconds
+        // Fixed-point ratio with 1_000_000 precision.
+        let scaledRatio = UInt32(max(250_000, min(4_000_000, Int((ratio * 1_000_000.0).rounded()))))
 
-        // Convert current bits to target, multiply by ratio, convert back
         let currentTarget = Difficulty(compact: currentBits).target
-
-        // Simple scaling: multiply target by ratio
-        // Higher ratio = more time taken = difficulty too high = increase target (make easier)
-        var targetValue = targetToDouble(currentTarget) * ratio
-        targetValue = min(targetValue, pow(2.0, 256) - 1) // cap at max
-
-        return doubleToCompact(targetValue)
+        let adjustedTarget = scaleTarget(currentTarget, multiplyBy: scaledRatio, divideBy: 1_000_000)
+        return compactFromTarget(adjustedTarget)
     }
 
     // MARK: - Private
@@ -88,30 +87,107 @@ public struct Difficulty {
         return true // equal
     }
 
-    private static func targetToDouble(_ target: Data) -> Double {
-        var value: Double = 0
-        for (i, byte) in target.enumerated() {
-            value += Double(byte) * pow(256.0, Double(31 - i))
+    private static func scaleTarget(_ target: Data, multiplyBy multiplier: UInt32, divideBy divisor: UInt32) -> Data {
+        guard multiplier > 0, divisor > 0 else { return target }
+
+        let words = wordsBE32(fromTarget: target)
+        let multiplied = multiply(words: words, by: multiplier)
+        let divided = divide(words: multiplied, by: divisor)
+
+        // Overflow beyond 256 bits => clamp to max target.
+        if divided[0] != 0 {
+            return Data(repeating: 0xFF, count: 32)
         }
-        return value
+
+        return targetFromWordsBE32(Array(divided.dropFirst()))
     }
 
-    private static func doubleToCompact(_ value: Double) -> UInt32 {
-        guard value > 0 else { return 0x0100_0001 }
+    private static func wordsBE32(fromTarget target: Data) -> [UInt32] {
+        var padded = Data(target.prefix(32))
+        if padded.count < 32 {
+            padded.insert(contentsOf: repeatElement(UInt8(0), count: 32 - padded.count), at: 0)
+        }
 
-        // Find the most significant byte position
-        var v = value
-        var exponent = 0
-        while v >= 256 {
-            v /= 256
+        var words = [UInt32](repeating: 0, count: 8)
+        for i in 0..<8 {
+            let offset = i * 4
+            words[i] =
+                (UInt32(padded[offset]) << 24) |
+                (UInt32(padded[offset + 1]) << 16) |
+                (UInt32(padded[offset + 2]) << 8) |
+                UInt32(padded[offset + 3])
+        }
+        return words
+    }
+
+    private static func targetFromWordsBE32(_ words: [UInt32]) -> Data {
+        var out = Data(capacity: 32)
+        for word in words.prefix(8) {
+            out.append(UInt8((word >> 24) & 0xFF))
+            out.append(UInt8((word >> 16) & 0xFF))
+            out.append(UInt8((word >> 8) & 0xFF))
+            out.append(UInt8(word & 0xFF))
+        }
+        return out
+    }
+
+    private static func multiply(words: [UInt32], by multiplier: UInt32) -> [UInt32] {
+        guard words.count == 8 else { return [UInt32](repeating: 0, count: 9) }
+
+        var out = [UInt32](repeating: 0, count: 9)
+        var carry: UInt64 = 0
+        for i in stride(from: words.count - 1, through: 0, by: -1) {
+            let product = UInt64(words[i]) * UInt64(multiplier) + carry
+            out[i + 1] = UInt32(product & 0xFFFF_FFFF)
+            carry = product >> 32
+        }
+        out[0] = UInt32(carry & 0xFFFF_FFFF)
+        return out
+    }
+
+    private static func divide(words: [UInt32], by divisor: UInt32) -> [UInt32] {
+        guard divisor > 0 else { return words }
+
+        var out = [UInt32](repeating: 0, count: words.count)
+        var remainder: UInt64 = 0
+        for i in 0..<words.count {
+            let value = (remainder << 32) | UInt64(words[i])
+            out[i] = UInt32(value / UInt64(divisor))
+            remainder = value % UInt64(divisor)
+        }
+        return out
+    }
+
+    private static func compactFromTarget(_ target: Data) -> UInt32 {
+        let bytes = Array(target.prefix(32))
+        guard let firstNonZero = bytes.firstIndex(where: { $0 != 0 }) else {
+            return 0
+        }
+
+        var exponent = bytes.count - firstNonZero
+        var coefficient: UInt32 = 0
+
+        if exponent <= 3 {
+            for i in 0..<exponent {
+                coefficient |= UInt32(bytes[firstNonZero + i]) << UInt32(8 * (2 - i))
+            }
+            coefficient <<= UInt32(8 * (3 - exponent))
+        } else {
+            coefficient = UInt32(bytes[firstNonZero]) << 16
+            if firstNonZero + 1 < bytes.count {
+                coefficient |= UInt32(bytes[firstNonZero + 1]) << 8
+            }
+            if firstNonZero + 2 < bytes.count {
+                coefficient |= UInt32(bytes[firstNonZero + 2])
+            }
+        }
+
+        if (coefficient & 0x0080_0000) != 0 {
+            coefficient >>= 8
             exponent += 1
         }
-        exponent += 1 // 1-based
 
-        // Extract 3 most significant bytes
-        let coefficient = UInt32(value / pow(256.0, Double(max(0, exponent - 3))))
-        let clampedCoeff = coefficient & 0x007F_FFFF
-
-        return (UInt32(exponent) << 24) | clampedCoeff
+        coefficient &= 0x007F_FFFF
+        return (UInt32(exponent) << 24) | coefficient
     }
 }

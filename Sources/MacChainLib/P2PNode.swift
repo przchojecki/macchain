@@ -11,6 +11,7 @@ public struct NodeServiceConfig {
     public var maxPayloadBase64Bytes: Int
     public var maxPendingBlockRequests: Int
     public var blockRequestTTLSeconds: TimeInterval
+    public var maxInFlightAsyncTasks: Int
 
     public init(
         networkID: String = "macchain-main",
@@ -21,7 +22,8 @@ public struct NodeServiceConfig {
         maxInboundFrameBytes: Int = 4_000_000,
         maxPayloadBase64Bytes: Int = 3_000_000,
         maxPendingBlockRequests: Int = 4_096,
-        blockRequestTTLSeconds: TimeInterval = 300
+        blockRequestTTLSeconds: TimeInterval = 300,
+        maxInFlightAsyncTasks: Int = 256
     ) {
         self.networkID = networkID
         self.listenPort = listenPort
@@ -32,6 +34,7 @@ public struct NodeServiceConfig {
         self.maxPayloadBase64Bytes = maxPayloadBase64Bytes
         self.maxPendingBlockRequests = maxPendingBlockRequests
         self.blockRequestTTLSeconds = blockRequestTTLSeconds
+        self.maxInFlightAsyncTasks = maxInFlightAsyncTasks
     }
 }
 
@@ -93,12 +96,15 @@ public final class P2PNodeService {
     private let queue = DispatchQueue(label: "macchain.p2p.node")
     private let encoder = JSONEncoder()
     private let requestedBlockLock = NSLock()
+    private let peersLock = NSLock()
+    private let asyncWorkLock = NSLock()
 
     private var listener: NWListener?
     private var heartbeatTimer: DispatchSourceTimer?
     private var peers: [UUID: PeerSession] = [:]
     private var peerHandshake: [UUID: PeerHandshakeState] = [:]
     private var requestedBlockHashes: [String: TimeInterval] = [:]
+    private var inFlightAsyncWork: Int = 0
 
     public init(config: NodeServiceConfig, chainState: ChainState, mempool: Mempool) {
         self.config = config
@@ -114,7 +120,8 @@ public final class P2PNodeService {
         guard config.maxInboundFrameBytes > 0,
               config.maxPayloadBase64Bytes > 0,
               config.maxPendingBlockRequests > 0,
-              config.blockRequestTTLSeconds > 0 else {
+              config.blockRequestTTLSeconds > 0,
+              config.maxInFlightAsyncTasks > 0 else {
             throw NodeServiceError.invalidLimits
         }
 
@@ -151,11 +158,14 @@ public final class P2PNodeService {
         listener?.cancel()
         listener = nil
 
-        for peer in peers.values {
+        let currentPeers = peersSnapshot()
+        for peer in currentPeers {
             peer.stop()
         }
+        peersLock.lock()
         peers.removeAll()
         peerHandshake.removeAll()
+        peersLock.unlock()
 
         requestedBlockLock.lock()
         requestedBlockHashes.removeAll()
@@ -173,7 +183,7 @@ public final class P2PNodeService {
     }
 
     public func submitLocalBlock(_ block: Block) {
-        Task { [weak self] in
+        submitBoundedAsyncWork(label: "submit-local-block") { [weak self] in
             guard let self else { return }
             let result = await chainState.submitBlock(block)
             if case .accepted = result {
@@ -188,7 +198,7 @@ public final class P2PNodeService {
     }
 
     public func submitLocalTransaction(_ transaction: Transaction) {
-        Task { [weak self] in
+        submitBoundedAsyncWork(label: "submit-local-tx") { [weak self] in
             guard let self else { return }
             let addResult = await mempool.add(transaction)
             if case .accepted = addResult {
@@ -199,19 +209,10 @@ public final class P2PNodeService {
     }
 
     private func accept(connection: NWConnection) {
-        if peers.count >= config.maxPeers {
-            connection.cancel()
-            return
-        }
         addPeer(connection: connection, label: "inbound")
     }
 
     private func addPeer(connection: NWConnection, label: String) {
-        if peers.count >= config.maxPeers {
-            connection.cancel()
-            return
-        }
-
         let peer = PeerSession(
             connection: connection,
             queue: queue,
@@ -227,28 +228,37 @@ public final class P2PNodeService {
             self?.removePeer(id: p.id)
         }
 
+        peersLock.lock()
+        if peers.count >= config.maxPeers {
+            peersLock.unlock()
+            connection.cancel()
+            return
+        }
         peers[peer.id] = peer
         peerHandshake[peer.id] = PeerHandshakeState()
+        peersLock.unlock()
         peer.start()
     }
 
     private func removePeer(id: UUID) {
+        peersLock.lock()
         peers[id] = nil
         peerHandshake[id] = nil
+        peersLock.unlock()
     }
 
     private func handlePeerReady(_ peer: PeerSession, label: String) {
-        Task {
-            let tip = await chainState.tip()
+        submitBoundedAsyncWork(label: "peer-ready") { [self] in
+            let tip = await self.chainState.tip()
             let version = WireMessage(
                 kind: .version,
-                networkID: config.networkID,
-                nodeID: localNodeID,
+                networkID: self.config.networkID,
+                nodeID: self.localNodeID,
                 height: tip.height,
                 hashHex: tip.hash.hexString
             )
-            peer.send(version, encoder: encoder)
-            log("connected peer (\(label)) \(peer.id.uuidString)")
+            peer.send(version, encoder: self.encoder)
+            self.log("connected peer (\(label)) \(peer.id.uuidString)")
         }
     }
 
@@ -285,20 +295,24 @@ public final class P2PNodeService {
                 return
             }
             peer.send(WireMessage(kind: .verack), encoder: encoder)
-            Task {
-                let tip = await chainState.tip()
+            submitBoundedAsyncWork(label: "send-tip-after-version") { [self] in
+                let tip = await self.chainState.tip()
                 peer.send(
                     WireMessage(
                         kind: .tip,
                         height: tip.height,
                         hashHex: tip.hash.hexString
                     ),
-                    encoder: encoder
+                    encoder: self.encoder
                 )
             }
 
         case .verack:
-            markPeerSawVerack(peer.id)
+            guard markPeerSawVerack(peer.id) else {
+                log("peer \(peer.id.uuidString) sent invalid verack")
+                peer.stop()
+                return
+            }
             peer.send(WireMessage(kind: .getTip), encoder: encoder)
 
         case .ping:
@@ -308,15 +322,15 @@ public final class P2PNodeService {
             break
 
         case .getTip:
-            Task {
-                let tip = await chainState.tip()
+            submitBoundedAsyncWork(label: "respond-getTip") { [self] in
+                let tip = await self.chainState.tip()
                 peer.send(
                     WireMessage(
                         kind: .tip,
                         height: tip.height,
                         hashHex: tip.hash.hexString
                     ),
-                    encoder: encoder
+                    encoder: self.encoder
                 )
             }
 
@@ -326,13 +340,13 @@ public final class P2PNodeService {
                 return
             }
 
-            Task {
-                let localTip = await chainState.tip()
+            submitBoundedAsyncWork(label: "tip-sync") { [self] in
+                let localTip = await self.chainState.tip()
                 guard peerHeight > localTip.height else { return }
                 guard let peerTipHash = Data(hexString: peerTipHashHex) else { return }
-                guard await chainState.block(hash: peerTipHash) == nil else { return }
+                guard await self.chainState.block(hash: peerTipHash) == nil else { return }
 
-                requestBlockIfNeeded(hashHex: peerTipHashHex, from: peer)
+                self.requestBlockIfNeeded(hashHex: peerTipHashHex, from: peer)
             }
 
         case .block:
@@ -343,28 +357,28 @@ public final class P2PNodeService {
             }
             clearRequestedBlock(hashHex: block.blockHash.hexString)
 
-            Task {
-                let result = await chainState.submitBlock(block)
+            submitBoundedAsyncWork(label: "handle-block") { [self] in
+                let result = await self.chainState.submitBlock(block)
                 switch result {
                 case .accepted(_, let becameBest):
                     let txIDs = block.transactions.map(\.txID)
-                    await mempool.remove(txIDs: txIDs)
+                    await self.mempool.remove(txIDs: txIDs)
 
                     if becameBest {
-                        let tip = await chainState.tip()
+                        let tip = await self.chainState.tip()
                         let msg = WireMessage(
                             kind: .tip,
                             height: tip.height,
                             hashHex: tip.hash.hexString
                         )
-                        broadcast(msg)
+                        self.broadcast(msg)
                     }
                 case .orphan(let parentHash):
-                    requestBlockIfNeeded(hashHex: parentHash.hexString, from: peer)
+                    self.requestBlockIfNeeded(hashHex: parentHash.hexString, from: peer)
                 case .duplicate:
                     break
                 case .rejected(let reason):
-                    log("rejected peer block \(block.blockHash.hexString): \(reason)")
+                    self.log("rejected peer block \(block.blockHash.hexString): \(reason)")
                 }
             }
 
@@ -375,10 +389,10 @@ public final class P2PNodeService {
                 return
             }
 
-            Task {
-                guard let block = await chainState.block(hash: hash) else { return }
+            submitBoundedAsyncWork(label: "respond-getBlock") { [self] in
+                guard let block = await self.chainState.block(hash: hash) else { return }
                 let payload = block.serialized().base64EncodedString()
-                peer.send(WireMessage(kind: .block, payloadBase64: payload), encoder: encoder)
+                peer.send(WireMessage(kind: .block, payloadBase64: payload), encoder: self.encoder)
             }
 
         case .tx:
@@ -388,8 +402,8 @@ public final class P2PNodeService {
                 return
             }
 
-            Task {
-                _ = await mempool.add(tx)
+            submitBoundedAsyncWork(label: "handle-tx") { [self] in
+                _ = await self.mempool.add(tx)
             }
         }
     }
@@ -408,7 +422,7 @@ public final class P2PNodeService {
     }
 
     private func broadcast(_ message: WireMessage) {
-        for peer in peers.values {
+        for peer in peersSnapshot() {
             peer.send(message, encoder: encoder)
         }
     }
@@ -423,11 +437,15 @@ public final class P2PNodeService {
     }
 
     private func isHandshakeComplete(for peerID: UUID) -> Bool {
-        peerHandshake[peerID]?.isComplete ?? false
+        peersLock.lock()
+        defer { peersLock.unlock() }
+        return peerHandshake[peerID]?.isComplete ?? false
     }
 
     @discardableResult
     private func markPeerSawVersion(_ peerID: UUID) -> Bool {
+        peersLock.lock()
+        defer { peersLock.unlock() }
         var state = peerHandshake[peerID] ?? PeerHandshakeState()
         if state.sawVersion {
             return false
@@ -437,10 +455,17 @@ public final class P2PNodeService {
         return true
     }
 
-    private func markPeerSawVerack(_ peerID: UUID) {
+    @discardableResult
+    private func markPeerSawVerack(_ peerID: UUID) -> Bool {
+        peersLock.lock()
+        defer { peersLock.unlock() }
         var state = peerHandshake[peerID] ?? PeerHandshakeState()
+        guard state.sawVersion, !state.sawVerack else {
+            return false
+        }
         state.sawVerack = true
         peerHandshake[peerID] = state
+        return true
     }
 
     private func requestBlockIfNeeded(hashHex: String, from peer: PeerSession) {
@@ -496,6 +521,46 @@ public final class P2PNodeService {
 
     private func log(_ message: String) {
         print("[p2p] \(message)")
+    }
+
+    private func peersSnapshot() -> [PeerSession] {
+        peersLock.lock()
+        let snapshot = Array(peers.values)
+        peersLock.unlock()
+        return snapshot
+    }
+
+    private func submitBoundedAsyncWork(
+        label: String,
+        _ work: @escaping @Sendable () async -> Void
+    ) {
+        guard tryBeginAsyncWork() else {
+            log("dropping async work (\(label)); max in-flight reached")
+            return
+        }
+
+        Task { [weak self] in
+            await work()
+            self?.endAsyncWork()
+        }
+    }
+
+    private func tryBeginAsyncWork() -> Bool {
+        asyncWorkLock.lock()
+        defer { asyncWorkLock.unlock() }
+        guard inFlightAsyncWork < config.maxInFlightAsyncTasks else {
+            return false
+        }
+        inFlightAsyncWork += 1
+        return true
+    }
+
+    private func endAsyncWork() {
+        asyncWorkLock.lock()
+        if inFlightAsyncWork > 0 {
+            inFlightAsyncWork -= 1
+        }
+        asyncWorkLock.unlock()
     }
 }
 

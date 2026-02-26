@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 
 public struct ChainPolicy {
     public var maxBlockBytes: Int
@@ -90,6 +91,7 @@ public actor ChainState {
     private struct ChainNode {
         let block: Block
         let hash: Data
+        let parentHash: Data?
         let height: UInt64
         let totalWork: UInt64
         let utxo: [OutPoint: TransactionOutput]
@@ -145,6 +147,7 @@ public actor ChainState {
         let node = ChainNode(
             block: genesis,
             hash: hash,
+            parentHash: nil,
             height: 0,
             totalWork: Self.workScore(bits: genesis.header.bits),
             utxo: genesisUTXO
@@ -255,6 +258,7 @@ public actor ChainState {
         let node = ChainNode(
             block: block,
             hash: hash,
+            parentHash: parent.hash,
             height: parent.height + 1,
             totalWork: parent.totalWork &+ Self.workScore(bits: block.header.bits),
             utxo: nextUTXO
@@ -369,10 +373,11 @@ public actor ChainState {
         bits: UInt32 = 0x1f00ffff,
         networkTag: String = "macchain-main"
     ) -> Block {
+        let genesisKey = deterministicGenesisKey(networkTag: networkTag)
         let coinbase = Transaction.coinbase(
             height: 0,
             value: 5_000_000_000,
-            to: Data("macchain-genesis-\(networkTag)".utf8)
+            to: TxScript.makePayToEd25519(publicKey: genesisKey.publicKey.rawRepresentation)
         )
         let merkleRoot = Block.merkleRoot(for: [coinbase])
         let header = BlockHeader(
@@ -390,22 +395,28 @@ public actor ChainState {
         return Block(header: header, proof: proof, transactions: [coinbase])
     }
 
+    public static func insecureGenesisPrivateKey(
+        networkTag: String = "macchain-main"
+    ) -> Curve25519.Signing.PrivateKey {
+        deterministicGenesisKey(networkTag: networkTag)
+    }
+
     private func expectedBitsForNextBlock(parent: ChainNode) -> UInt32 {
-        // Placeholder for difficulty retarget integration.
-        parent.block.header.bits
+        Self.expectedBitsForNextBlock(
+            parent: parent,
+            nodesByHash: nodesByHash,
+            minimumDifficulty: config.minimumDifficulty
+        )
     }
 
     private static func workScore(bits: UInt32) -> UInt64 {
-        let exponent = Int(bits >> 24)
-        let coefficient = bits & 0x00FF_FFFF
-        guard coefficient > 0 else { return 0 }
-
-        // Monotonic approximation: smaller exponent => harder => more work.
-        let shift = max(0, 32 - exponent)
-        if shift >= 63 {
-            return UInt64.max / 2
+        let target = Difficulty(compact: bits).target
+        var prefix: UInt64 = 0
+        for byte in target.prefix(8) {
+            prefix = (prefix << 8) | UInt64(byte)
         }
-        return UInt64(1) << UInt64(shift)
+        guard prefix > 0 else { return UInt64.max / 2 }
+        return UInt64.max / (prefix | 1)
     }
 
     private static func rebuildFromPersistedBlocks(
@@ -444,6 +455,7 @@ public actor ChainState {
                     block: block,
                     parent: parent,
                     hash: hash,
+                    nodesByHash: nodes,
                     config: config,
                     now: now
                 ) else {
@@ -468,6 +480,7 @@ public actor ChainState {
         block: Block,
         parent: ChainNode,
         hash: Data,
+        nodesByHash: [Data: ChainNode],
         config: ChainConfig,
         now: UInt32
     ) -> ChainNode? {
@@ -501,7 +514,11 @@ public actor ChainState {
         }
 
         if !config.policy.allowInsecureBlocks {
-            let expectedBits = parent.block.header.bits
+            let expectedBits = expectedBitsForNextBlock(
+                parent: parent,
+                nodesByHash: nodesByHash,
+                minimumDifficulty: config.minimumDifficulty
+            )
             let verifier = Verifier(
                 params: config.params,
                 difficulty: config.minimumDifficulty,
@@ -516,10 +533,89 @@ public actor ChainState {
         return ChainNode(
             block: block,
             hash: hash,
+            parentHash: parent.hash,
             height: parent.height + 1,
             totalWork: parent.totalWork &+ workScore(bits: block.header.bits),
             utxo: nextUTXO
         )
+    }
+
+    private static func expectedBitsForNextBlock(
+        parent: ChainNode,
+        nodesByHash: [Data: ChainNode],
+        minimumDifficulty: Difficulty
+    ) -> UInt32 {
+        let nextHeight = parent.height + 1
+        guard kBlocksPerAdjustment > 1,
+              nextHeight % kBlocksPerAdjustment == 0 else {
+            return parent.block.header.bits
+        }
+
+        guard let windowStart = ancestor(
+            from: parent,
+            stepsBack: kBlocksPerAdjustment - 1,
+            nodesByHash: nodesByHash
+        ) else {
+            return parent.block.header.bits
+        }
+
+        let startTS = Int64(windowStart.block.header.timestamp)
+        let endTS = Int64(parent.block.header.timestamp)
+        let actualTimespan = max(1.0, Double(max(0, endTS - startTS)))
+        let expectedTimespan = max(1.0, kTargetBlockTimeSeconds * Double(kBlocksPerAdjustment - 1))
+
+        var nextBits = Difficulty.adjust(
+            currentBits: parent.block.header.bits,
+            actualTimeSeconds: actualTimespan,
+            expectedTimeSeconds: expectedTimespan
+        )
+
+        if isTargetEasier(
+            Difficulty(compact: nextBits).target,
+            than: minimumDifficulty.target
+        ) {
+            nextBits = minimumDifficulty.compact
+        }
+
+        return nextBits
+    }
+
+    private static func ancestor(
+        from node: ChainNode,
+        stepsBack: UInt64,
+        nodesByHash: [Data: ChainNode]
+    ) -> ChainNode? {
+        var current = node
+        var remaining = stepsBack
+        while remaining > 0 {
+            guard let parentHash = current.parentHash,
+                  let parent = nodesByHash[parentHash] else {
+                return nil
+            }
+            current = parent
+            remaining -= 1
+        }
+        return current
+    }
+
+    private static func isTargetEasier(_ lhs: Data, than rhs: Data) -> Bool {
+        let l = Array(lhs.prefix(32))
+        let r = Array(rhs.prefix(32))
+        for i in 0..<32 {
+            let lb = i < l.count ? l[i] : 0
+            let rb = i < r.count ? r[i] : 0
+            if lb > rb { return true }
+            if lb < rb { return false }
+        }
+        return false
+    }
+
+    private static func deterministicGenesisKey(networkTag: String) -> Curve25519.Signing.PrivateKey {
+        let seed = Data(SHA256.hash(data: Data("macchain-genesis-key-\(networkTag)".utf8)))
+        guard let key = try? Curve25519.Signing.PrivateKey(rawRepresentation: seed) else {
+            fatalError("failed to derive deterministic genesis key")
+        }
+        return key
     }
 
     private static func selectBestHash(_ nodes: [Data: ChainNode]) -> Data? {

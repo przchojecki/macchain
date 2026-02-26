@@ -71,6 +71,7 @@ This keeps verification much cheaper than full mining.
 - chainstate persists accepted blocks and best-tip metadata to disk
 - on restart, chainstate replays persisted blocks from genesis and recomputes best tip by total work
 - tx authorization uses a minimal script template: pay-to-Ed25519-public-key locking script + Ed25519 signature unlocking script
+- default insecure genesis now uses a deterministic Ed25519 locking script derived from `network-id`
 - signature checks are enforced during block validation and mempool admission
 
 ## Build
@@ -173,7 +174,7 @@ Workflow file: `.github/workflows/ci.yml`
 
 ## Releases
 
-Release workflow triggers on tags matching `v*` and publishes:
+Release workflow triggers on tags matching `v*` or plain semver (`*.*.*`) and publishes:
 
 - `macchain-<tag>-macos-arm64.tar.gz`
 - `macchain-<tag>-macos-arm64.sha256`
@@ -181,8 +182,13 @@ Release workflow triggers on tags matching `v*` and publishes:
 Create a release by tagging and pushing:
 
 ```bash
-git tag v0.1.0
-git push origin v0.1.0
+# plain semver
+git tag 0.1.5
+git push origin 0.1.5
+
+# or prefixed semver
+git tag v0.1.5
+git push origin v0.1.5
 ```
 
 Workflow file: `.github/workflows/release.yml`

@@ -23,17 +23,19 @@ echo ""
 # Step 1: Compile Metal shaders
 echo "[1/4] Compiling Metal shaders..."
 METAL_FILES=$(find "$SHADER_DIR" -name "*.metal" 2>/dev/null)
-if [ -n "$METAL_FILES" ]; then
+if ! xcrun --find metal >/dev/null 2>&1 || ! xcrun --find metallib >/dev/null 2>&1; then
+    echo "  Warning: Metal compiler tools not found (metal/metallib); skipping shader compilation."
+elif [ -n "$METAL_FILES" ]; then
     AIR_FILES=""
     for metal_file in $METAL_FILES; do
         base=$(basename "$metal_file" .metal)
-        xcrun metal -c "$metal_file" -o "$BUILD_DIR/metallib/$base.air" 2>/dev/null || true
+        xcrun metal -c "$metal_file" -o "$BUILD_DIR/metallib/$base.air"
         if [ -f "$BUILD_DIR/metallib/$base.air" ]; then
             AIR_FILES="$AIR_FILES $BUILD_DIR/metallib/$base.air"
         fi
     done
     if [ -n "$AIR_FILES" ]; then
-        xcrun metallib $AIR_FILES -o "$BUILD_DIR/metallib/default.metallib" 2>/dev/null || true
+        xcrun metallib $AIR_FILES -o "$BUILD_DIR/metallib/default.metallib"
     fi
 fi
 echo "  Done."

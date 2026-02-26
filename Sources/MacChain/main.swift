@@ -2,7 +2,7 @@ import Foundation
 import MacChainLib
 
 private let appName = "macchain"
-private let cliVersion = "0.1.3"
+private let cliVersion = "0.1.5"
 private var activeNodeService: P2PNodeService?
 
 private struct ParsedCommandArgs {

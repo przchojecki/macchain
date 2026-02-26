@@ -377,6 +377,44 @@ final class ChainStateTests: XCTestCase {
         XCTAssertEqual(await state.utxo(for: newOutPoint)?.value, 4_999_999_000)
     }
 
+    func testDefaultInsecureGenesisSpendableWithDerivedKey() async throws {
+        let networkTag = "chainstate-derived-key-test"
+        let genesis = ChainState.makeInsecureGenesis(timestamp: 1, networkTag: networkTag)
+        let key = ChainState.insecureGenesisPrivateKey(networkTag: networkTag)
+
+        let policy = ChainPolicy(allowInsecureGenesis: true, allowInsecureBlocks: true, enforceSignatureScripts: true)
+        let state = try ChainState(config: ChainConfig(genesisBlock: genesis, policy: policy))
+
+        let genesisTx = genesis.transactions[0]
+        var spend = Transaction(
+            inputs: [
+                TransactionInput(
+                    prevTxID: genesisTx.txID,
+                    outputIndex: 0,
+                    unlockingScript: Data()
+                )
+            ],
+            outputs: [
+                TransactionOutput(
+                    value: 4_999_999_000,
+                    lockingScript: TxScript.makePayToEd25519(publicKey: key.publicKey.rawRepresentation)
+                )
+            ]
+        )
+        XCTAssertTrue(spend.signInput(at: 0, privateKey: key, previousOutput: genesisTx.outputs[0]))
+
+        let coinbase = Transaction.coinbase(height: 1, value: 5_000_001_000, to: Data("miner".utf8))
+        let block = makeBlock(parent: genesis, transactions: [coinbase, spend], timestamp: 2, nonce: 42)
+
+        let result = await state.submitBlock(block)
+        switch result {
+        case .accepted(let height, _):
+            XCTAssertEqual(height, 1)
+        default:
+            XCTFail("Expected accepted block with derived genesis key spend, got \(result)")
+        }
+    }
+
     private func makeDevChildBlock(parent: Block, height: UInt64, timestamp: UInt32, marker: String) -> Block {
         let coinbase = Transaction.coinbase(
             height: height,

@@ -98,6 +98,31 @@ final class MempoolTests: XCTestCase {
         }
     }
 
+    func testRejectMissingInputWithUnconfirmedParentsEnabled() async throws {
+        let genesis = ChainState.makeInsecureGenesis(timestamp: 1)
+        let chain = try ChainState(config: ChainConfig(genesisBlock: genesis))
+        let mempool = Mempool(chainState: chain, allowUnconfirmedParents: true)
+
+        let tx = Transaction(
+            inputs: [
+                TransactionInput(
+                    prevTxID: Data(repeating: 0xCD, count: 32),
+                    outputIndex: 0,
+                    unlockingScript: Data([0x01])
+                )
+            ],
+            outputs: [TransactionOutput(value: 10, lockingScript: Data([0x51]))]
+        )
+
+        let result = await mempool.add(tx)
+        switch result {
+        case .rejected(let reason):
+            XCTAssertTrue(reason.contains("missing input"))
+        default:
+            XCTFail("Expected missing input rejection, got \(result)")
+        }
+    }
+
     private func makeSignedSpendFromGenesis(
         genesis: Block,
         privateKey: Curve25519.Signing.PrivateKey,
