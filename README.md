@@ -79,6 +79,30 @@ Produces:
 - `.build/release/macchain`
 - `.build/release/macchain-bench`
 
+## Quickstart Mining
+
+Build and mine a first proof:
+
+```bash
+# Build binaries
+bash build.sh
+
+# Check CLI options
+.build/release/macchain --help
+
+# Quick benchmark (optional)
+.build/release/macchain bench --graphs 3
+
+# Mine up to 100k attempts
+.build/release/macchain mine --start-nonce 0 --max-attempts 100000
+```
+
+Verify a proof returned by the miner:
+
+```bash
+.build/release/macchain verify --proof <hex-from-mine-output>
+```
+
 ## CLI Usage
 
 ```bash
