@@ -1,6 +1,6 @@
 # MacChain
 
-MacChain is a Mac-first proof-of-work prototype built for Apple Silicon.
+MacChain is a Mac-first proof-of-work blockchain built for Apple Silicon.
 
 It combines CPU AES, AMX-style matrix mixing, and Metal GPU trimming into a single mining pipeline that is optimized for unified-memory Macs.
 
@@ -137,7 +137,7 @@ Package.swift
 
 ## Status
 
-This repository is an implementation prototype, not a production consensus system.
+This repository contains the MacChain blockchain implementation and tooling.
 
 Current focus:
 

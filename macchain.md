@@ -1,8 +1,8 @@
 # MacChain
 
-**A Mac-first proof-of-work algorithm designed for Apple Silicon.**
+**A Mac-first proof-of-work blockchain designed for Apple Silicon.**
 
-MacChain is a modified Cuckoo Cycle proof-of-work that exploits the unique hardware characteristics of Apple Silicon — unified memory, hardware AES, the AMX matrix coprocessor, and Metal GPU compute — to create a mining algorithm that runs optimally on consumer Macs and is economically impractical to target with ASICs.
+MacChain is a modified Cuckoo Cycle proof-of-work blockchain that exploits the unique hardware characteristics of Apple Silicon — unified memory, hardware AES, the AMX matrix coprocessor, and Metal GPU compute — to create a mining algorithm that runs optimally on consumer Macs and is economically impractical to target with ASICs.
 
 ---
 
