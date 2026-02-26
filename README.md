@@ -136,6 +136,8 @@ Notes:
 
 - this is an initial public-network skeleton (handshake, tip exchange, tx/block relay)
 - nodes request missing blocks with `getBlock` when peers advertise higher tips or send orphans
+- peers must complete version/verack handshake before block/tx data is accepted
+- inbound frame size, message payload size, and pending block-request queue are bounded
 - chainstate enforces block structure, UTXO transitions, and script/signature checks
 - blocks/tip metadata are persisted under `--data-dir` and rebuilt on restart
 - full fork-choice/difficulty-retarget networking logic is still evolving

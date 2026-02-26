@@ -7,19 +7,31 @@ public struct NodeServiceConfig {
     public var bootstrapPeers: [String]
     public var maxPeers: Int
     public var heartbeatSeconds: TimeInterval
+    public var maxInboundFrameBytes: Int
+    public var maxPayloadBase64Bytes: Int
+    public var maxPendingBlockRequests: Int
+    public var blockRequestTTLSeconds: TimeInterval
 
     public init(
         networkID: String = "macchain-main",
         listenPort: UInt16 = 8338,
         bootstrapPeers: [String] = [],
         maxPeers: Int = 32,
-        heartbeatSeconds: TimeInterval = 15
+        heartbeatSeconds: TimeInterval = 15,
+        maxInboundFrameBytes: Int = 4_000_000,
+        maxPayloadBase64Bytes: Int = 3_000_000,
+        maxPendingBlockRequests: Int = 4_096,
+        blockRequestTTLSeconds: TimeInterval = 300
     ) {
         self.networkID = networkID
         self.listenPort = listenPort
         self.bootstrapPeers = bootstrapPeers
         self.maxPeers = maxPeers
         self.heartbeatSeconds = heartbeatSeconds
+        self.maxInboundFrameBytes = maxInboundFrameBytes
+        self.maxPayloadBase64Bytes = maxPayloadBase64Bytes
+        self.maxPendingBlockRequests = maxPendingBlockRequests
+        self.blockRequestTTLSeconds = blockRequestTTLSeconds
     }
 }
 
@@ -64,6 +76,15 @@ public struct WireMessage: Codable {
 }
 
 public final class P2PNodeService {
+    private struct PeerHandshakeState {
+        var sawVersion: Bool = false
+        var sawVerack: Bool = false
+
+        var isComplete: Bool {
+            sawVersion && sawVerack
+        }
+    }
+
     public let config: NodeServiceConfig
 
     private let chainState: ChainState
@@ -76,7 +97,8 @@ public final class P2PNodeService {
     private var listener: NWListener?
     private var heartbeatTimer: DispatchSourceTimer?
     private var peers: [UUID: PeerSession] = [:]
-    private var requestedBlockHashes: Set<String> = []
+    private var peerHandshake: [UUID: PeerHandshakeState] = [:]
+    private var requestedBlockHashes: [String: TimeInterval] = [:]
 
     public init(config: NodeServiceConfig, chainState: ChainState, mempool: Mempool) {
         self.config = config
@@ -88,6 +110,12 @@ public final class P2PNodeService {
         guard listener == nil else { return }
         guard let port = NWEndpoint.Port(rawValue: config.listenPort) else {
             throw NodeServiceError.invalidPort
+        }
+        guard config.maxInboundFrameBytes > 0,
+              config.maxPayloadBase64Bytes > 0,
+              config.maxPendingBlockRequests > 0,
+              config.blockRequestTTLSeconds > 0 else {
+            throw NodeServiceError.invalidLimits
         }
 
         let listener = try NWListener(using: .tcp, on: port)
@@ -127,6 +155,11 @@ public final class P2PNodeService {
             peer.stop()
         }
         peers.removeAll()
+        peerHandshake.removeAll()
+
+        requestedBlockLock.lock()
+        requestedBlockHashes.removeAll()
+        requestedBlockLock.unlock()
     }
 
     public func connect(to endpoint: String) {
@@ -179,7 +212,11 @@ public final class P2PNodeService {
             return
         }
 
-        let peer = PeerSession(connection: connection, queue: queue)
+        let peer = PeerSession(
+            connection: connection,
+            queue: queue,
+            maxFrameBytes: config.maxInboundFrameBytes
+        )
         peer.onReady = { [weak self] p in
             self?.handlePeerReady(p, label: label)
         }
@@ -191,11 +228,13 @@ public final class P2PNodeService {
         }
 
         peers[peer.id] = peer
+        peerHandshake[peer.id] = PeerHandshakeState()
         peer.start()
     }
 
     private func removePeer(id: UUID) {
         peers[id] = nil
+        peerHandshake[id] = nil
     }
 
     private func handlePeerReady(_ peer: PeerSession, label: String) {
@@ -214,10 +253,34 @@ public final class P2PNodeService {
     }
 
     private func handlePeerMessage(peer: PeerSession, message: WireMessage) {
+        if let payload = message.payloadBase64,
+           payload.utf8.count > config.maxPayloadBase64Bytes {
+            log("peer \(peer.id.uuidString) exceeded payload limit")
+            peer.stop()
+            return
+        }
+
+        if message.kind != .version && message.kind != .verack &&
+            requiresHandshake(message.kind) && !isHandshakeComplete(for: peer.id) {
+            log("peer \(peer.id.uuidString) sent \(message.kind.rawValue) before handshake")
+            peer.stop()
+            return
+        }
+
         switch message.kind {
         case .version:
             guard message.networkID == config.networkID else {
                 log("peer \(peer.id.uuidString) network mismatch")
+                peer.stop()
+                return
+            }
+            if message.nodeID == localNodeID {
+                log("peer \(peer.id.uuidString) loopback node ID, disconnecting")
+                peer.stop()
+                return
+            }
+            guard markPeerSawVersion(peer.id) else {
+                log("peer \(peer.id.uuidString) sent duplicate version")
                 peer.stop()
                 return
             }
@@ -235,8 +298,8 @@ public final class P2PNodeService {
             }
 
         case .verack:
-            // handshake complete
-            break
+            markPeerSawVerack(peer.id)
+            peer.send(WireMessage(kind: .getTip), encoder: encoder)
 
         case .ping:
             peer.send(WireMessage(kind: .pong, nonce: message.nonce), encoder: encoder)
@@ -307,6 +370,7 @@ public final class P2PNodeService {
 
         case .getBlock:
             guard let hashHex = message.hashHex,
+                  hashHex.count <= 64,
                   let hash = Data(hexString: hashHex) else {
                 return
             }
@@ -349,13 +413,56 @@ public final class P2PNodeService {
         }
     }
 
+    private func requiresHandshake(_ kind: WireMessage.Kind) -> Bool {
+        switch kind {
+        case .version, .verack, .ping, .pong:
+            return false
+        case .getTip, .getBlock, .tip, .block, .tx:
+            return true
+        }
+    }
+
+    private func isHandshakeComplete(for peerID: UUID) -> Bool {
+        peerHandshake[peerID]?.isComplete ?? false
+    }
+
+    @discardableResult
+    private func markPeerSawVersion(_ peerID: UUID) -> Bool {
+        var state = peerHandshake[peerID] ?? PeerHandshakeState()
+        if state.sawVersion {
+            return false
+        }
+        state.sawVersion = true
+        peerHandshake[peerID] = state
+        return true
+    }
+
+    private func markPeerSawVerack(_ peerID: UUID) {
+        var state = peerHandshake[peerID] ?? PeerHandshakeState()
+        state.sawVerack = true
+        peerHandshake[peerID] = state
+    }
+
     private func requestBlockIfNeeded(hashHex: String, from peer: PeerSession) {
         let normalized = hashHex.lowercased()
         guard !normalized.isEmpty else { return }
+
+        let now = Date().timeIntervalSince1970
         requestedBlockLock.lock()
-        let inserted = requestedBlockHashes.insert(normalized).inserted
+        pruneRequestedBlockHashesLocked(now: now)
+
+        if requestedBlockHashes[normalized] != nil {
+            requestedBlockLock.unlock()
+            return
+        }
+        if requestedBlockHashes.count >= config.maxPendingBlockRequests {
+            requestedBlockLock.unlock()
+            log("request queue full, skipping block request \(normalized.prefix(16))...")
+            return
+        }
+
+        requestedBlockHashes[normalized] = now
         requestedBlockLock.unlock()
-        guard inserted else { return }
 
         peer.send(
             WireMessage(kind: .getBlock, hashHex: normalized),
@@ -367,8 +474,14 @@ public final class P2PNodeService {
     private func clearRequestedBlock(hashHex: String) {
         let normalized = hashHex.lowercased()
         requestedBlockLock.lock()
-        requestedBlockHashes.remove(normalized)
+        requestedBlockHashes.removeValue(forKey: normalized)
         requestedBlockLock.unlock()
+    }
+
+    private func pruneRequestedBlockHashesLocked(now: TimeInterval) {
+        requestedBlockHashes = requestedBlockHashes.filter {
+            now - $0.value <= config.blockRequestTTLSeconds
+        }
     }
 
     private func parseEndpoint(_ endpoint: String) -> (String, NWEndpoint.Port)? {
@@ -388,6 +501,7 @@ public final class P2PNodeService {
 
 public enum NodeServiceError: Error {
     case invalidPort
+    case invalidLimits
 }
 
 private final class PeerSession {
@@ -395,6 +509,7 @@ private final class PeerSession {
 
     private let connection: NWConnection
     private let queue: DispatchQueue
+    private let maxFrameBytes: Int
     private var receiveBuffer = Data()
     private var closed = false
 
@@ -402,9 +517,10 @@ private final class PeerSession {
     var onMessage: ((PeerSession, WireMessage) -> Void)?
     var onClosed: ((PeerSession) -> Void)?
 
-    init(connection: NWConnection, queue: DispatchQueue) {
+    init(connection: NWConnection, queue: DispatchQueue, maxFrameBytes: Int) {
         self.connection = connection
         self.queue = queue
+        self.maxFrameBytes = max(1_024, maxFrameBytes)
     }
 
     func start() {
@@ -444,6 +560,10 @@ private final class PeerSession {
 
             if let data, !data.isEmpty {
                 self.receiveBuffer.append(data)
+                if self.receiveBuffer.count > self.maxFrameBytes {
+                    self.closeIfNeeded()
+                    return
+                }
                 self.processReceiveBuffer()
             }
 
@@ -458,6 +578,10 @@ private final class PeerSession {
 
     private func processReceiveBuffer() {
         while let newline = receiveBuffer.firstIndex(of: 0x0A) {
+            if newline > maxFrameBytes {
+                closeIfNeeded()
+                return
+            }
             let line = Data(receiveBuffer[..<newline])
             receiveBuffer.removeSubrange(...newline)
 
