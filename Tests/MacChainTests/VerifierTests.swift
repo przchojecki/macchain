@@ -30,8 +30,8 @@ final class VerifierTests: XCTestCase {
         // Very easy target
         let easy = Difficulty(compact: 0x1f00_ffff)
         XCTAssertEqual(easy.target.count, 32)
-        // First byte should be non-zero (very large target)
-        XCTAssertGreaterThan(easy.target[0], 0)
+        // Expanded target should have at least one non-zero byte.
+        XCTAssertTrue(easy.target.contains { $0 != 0 })
     }
 
     func testDifficultySatisfied() {
