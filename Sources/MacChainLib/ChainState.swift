@@ -241,18 +241,20 @@ public actor ChainState {
             return .rejected("invalid transaction state transition")
         }
 
-        let expectedBits = expectedBitsForNextBlock(parent: parent)
-        let verifier = Verifier(
-            params: config.params,
-            difficulty: config.minimumDifficulty,
-            expectedBits: expectedBits,
-            enforceTrimmedCycle: true
-        )
-        switch verifier.verify(block.proof) {
-        case .valid:
-            break
-        case .invalid(let reason):
-            return .rejected("invalid proof: \(reason)")
+        if !config.policy.allowInsecureBlocks {
+            let expectedBits = expectedBitsForNextBlock(parent: parent)
+            let verifier = Verifier(
+                params: config.params,
+                difficulty: config.minimumDifficulty,
+                expectedBits: expectedBits,
+                enforceTrimmedCycle: true
+            )
+            switch verifier.verify(block.proof) {
+            case .valid:
+                break
+            case .invalid(let reason):
+                return .rejected("invalid proof: \(reason)")
+            }
         }
 
         let node = ChainNode(
