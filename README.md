@@ -4,6 +4,12 @@ MacChain is a Mac-first proof-of-work blockchain designed specifically for Apple
 
 What makes MacChain unique is its hybrid mining pipeline: CPU-dependent memory work (AES + matrix mixing) feeds directly into GPU graph trimming, followed by compact cycle proofs that are fast to verify. This makes it especially good for AI agents to mine, because agents can script the full loop (`bench` -> `mine` -> `verify`), tune parameters automatically, and validate results quickly in a deterministic CLI workflow without specialized hardware.
 
+## Blockchain Architecture
+
+MacChain uses a Nakamoto-style Proof-of-Work consensus model with UTXO accounting. Miners build blocks containing transactions and a PoW proof (`MacChainProof`) bound to the 80-byte block header; full nodes validate header/proof consistency, Merkle root correctness, timestamp bounds, transaction state transitions, coinbase subsidy limits, and script/signature authorization before accepting a block. Fork choice is heaviest-chain by cumulative work (`totalWork`) with deterministic tie-breaks, so competing branches can be reconstructed and re-evaluated from persisted block data.
+
+Transaction validity is enforced against the active tip UTXO set, including double-spend prevention, input/output value conservation, and Ed25519 unlocking against locking scripts. Networking is a message-framed P2P relay with version/verack handshake, tip exchange, block/tx propagation, and on-demand parent backfill (`getBlock`) when orphans or higher tips are observed. Chainstate is disk-backed (`--data-dir`) and rebuilds deterministically on restart, while difficulty adjustment and work scoring are integrated into block acceptance to keep consensus rules consistent across live validation and storage replay.
+
 ## Why This Exists
 
 Traditional Cuckoo Cycle variants are efficient to accelerate with specialized hardware. MacChain explores a different profile:
