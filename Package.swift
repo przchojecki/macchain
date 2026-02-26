@@ -10,9 +10,7 @@ let package = Package(
     products: [
         .library(name: "MacChainLib", targets: ["MacChainLib"]),
     ],
-    dependencies: [
-        .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.3.0"),
-    ],
+    dependencies: [],
     targets: [
         .target(
             name: "MacChainLib",
@@ -29,7 +27,6 @@ let package = Package(
             name: "MacChain",
             dependencies: [
                 "MacChainLib",
-                .product(name: "ArgumentParser", package: "swift-argument-parser"),
             ],
             path: "Sources/MacChain"
         ),
@@ -37,7 +34,6 @@ let package = Package(
             name: "MacChainBenchmark",
             dependencies: [
                 "MacChainLib",
-                .product(name: "ArgumentParser", package: "swift-argument-parser"),
             ],
             path: "Sources/MacChainBenchmark"
         ),
