@@ -10,6 +10,8 @@ MacChain uses a Nakamoto-style Proof-of-Work consensus model with UTXO accountin
 
 Transaction validity is enforced against the active tip UTXO set, including double-spend prevention, input/output value conservation, and Ed25519 unlocking against locking scripts. Networking is a message-framed P2P relay with version/verack handshake, tip exchange, block/tx propagation, and on-demand parent backfill (`getBlock`) when orphans or higher tips are observed. Chainstate is disk-backed (`--data-dir`) and rebuilds deterministically on restart, while difficulty adjustment and work scoring are integrated into block acceptance to keep consensus rules consistent across live validation and storage replay.
 
+On the mining side, MacChain follows the Cuckoo/Cuckatoo design family by searching for fixed-length cycles in a large bipartite graph, but adapts execution to Apple Silicon hardware characteristics. Each nonce drives deterministic edge generation, iterative trimming removes edges that cannot participate in a valid cycle, and miners prove discovery of an 8-cycle as compact evidence of work. This keeps verification lightweight while preserving the core memory-hard graph-search properties that make Cuckoo-style PoW resistant to naive compute-only optimization.
+
 ## Why This Exists
 
 Traditional Cuckoo Cycle variants are efficient to accelerate with specialized hardware. MacChain explores a different profile:
@@ -189,12 +191,12 @@ Create a release by tagging and pushing:
 
 ```bash
 # plain semver
-git tag 0.1.5
-git push origin 0.1.5
+git tag 0.1.6
+git push origin 0.1.6
 
 # or prefixed semver
-git tag v0.1.5
-git push origin v0.1.5
+git tag v0.1.6
+git push origin v0.1.6
 ```
 
 Workflow file: `.github/workflows/release.yml`
