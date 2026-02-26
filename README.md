@@ -191,12 +191,12 @@ Create a release by tagging and pushing:
 
 ```bash
 # plain semver
-git tag 0.1.6
-git push origin 0.1.6
+git tag 0.1.7
+git push origin 0.1.7
 
 # or prefixed semver
-git tag v0.1.6
-git push origin v0.1.6
+git tag v0.1.7
+git push origin v0.1.7
 ```
 
 Workflow file: `.github/workflows/release.yml`
